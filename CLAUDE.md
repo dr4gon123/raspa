@@ -129,6 +129,7 @@ All new code must follow these conventions.
 - `pypandoc_binary` is used (bundles the `pandoc` binary via pip — no system install needed).
 
 ### General style
+- **`@dataclass` for structured results** — use when a function returns or accumulates multiple related fields with a fixed schema. Prefer attribute access over string-keyed dicts; typos become parse-time errors instead of silent `None`.
 - **No `from __future__` workarounds for older Pythons** — target 3.10+ only.
 - **`DEFAULT_CONFIG.copy()`** not `dict(DEFAULT_CONFIG)`.
 - **`merge_args` stays a dict comprehension** — do not expand it back to per-key `if` blocks.
