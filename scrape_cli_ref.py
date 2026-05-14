@@ -6,41 +6,52 @@ Usage:
     python scrape_cli_ref.py                                        # all versions
     python scrape_cli_ref.py --version 8.0.0                        # one version
     python scrape_cli_ref.py --version 8.0.0 --section alertemail   # one section
-    python scrape_cli_ref.py --force                                # rescape everything
-    python scrape_cli_ref.py --retries 5 --timeout 60000            # more patient
-    python scrape_cli_ref.py --quiet                                # minimal output
+    python scrape_cli_ref.py --force                                # rescrape everything
+    python scrape_cli_ref.py --no-force                             # skip existing (default)
+    python scrape_cli_ref.py --retries 5 --timeout 60              # more patient
+    python scrape_cli_ref.py --concurrency 10                       # more parallel slots
+    python scrape_cli_ref.py --quiet                               # warnings and errors only
 """
+from __future__ import annotations
+
 import argparse
-import time
+import asyncio
+import logging
+import random
 from pathlib import Path
 
+import httpx
 import yaml
-from playwright.sync_api import sync_playwright, Page
 
 from discover import discover_commands
-from extract import extract_page, table_to_pandoc, output_path, build_markdown
+from extract import build_markdown, extract_page, output_path, table_to_pandoc
 
-REPO_ROOT = Path(__file__).resolve().parent
-VERSIONS_FILE = Path(__file__).resolve().parent / "versions.yaml"
-CONFIG_FILE = Path(__file__).resolve().parent / "scraper.yaml"
-DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+_HERE = Path(__file__).resolve().parent
+VERSIONS_FILE = _HERE / "versions.yaml"
+CONFIG_FILE = _HERE / "scraper.yaml"
 
-DEFAULT_CONFIG = {
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+DEFAULT_CONFIG: dict = {
     "force": False,
     "retries": 3,
-    "delay": 1.5,
-    "timeout": 30000,
-    "wait_until": "domcontentloaded",
-    "min_size": 200,
+    "delay": 1.5,        # seconds between requests per concurrent slot
+    "timeout": 30.0,     # HTTP request timeout in seconds
+    "min_size": 200,     # bytes — skip existing files larger than this
     "output_dir": "config",
     "user_agent": DEFAULT_UA,
-    "headed": False,
     "quiet": False,
+    "concurrency": 5,    # asyncio.Semaphore size
 }
+_OVERRIDABLE = frozenset(DEFAULT_CONFIG)
+
+logger = logging.getLogger(__name__)
 
 
 def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
+    cfg = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         file_cfg = yaml.safe_load(CONFIG_FILE.read_text())
         if file_cfg:
@@ -48,80 +59,122 @@ def load_config() -> dict:
     return cfg
 
 
-def merge_args(cfg: dict, args) -> dict:
-    if args.force is not None:
-        cfg["force"] = args.force
-    if args.retries is not None:
-        cfg["retries"] = args.retries
-    if args.delay is not None:
-        cfg["delay"] = args.delay
-    if args.timeout is not None:
-        cfg["timeout"] = args.timeout
-    if args.wait_until is not None:
-        cfg["wait_until"] = args.wait_until
-    if args.min_size is not None:
-        cfg["min_size"] = args.min_size
-    if args.headed is not None:
-        cfg["headed"] = args.headed
-    if args.quiet is not None:
-        cfg["quiet"] = args.quiet
-    return cfg
-
-
-def log(message: str, quiet: bool) -> None:
-    if not quiet:
-        print(message)
+def merge_args(cfg: dict, args: argparse.Namespace) -> dict:
+    overrides = {k: v for k, v in vars(args).items() if k in _OVERRIDABLE and v is not None}
+    return {**cfg, **overrides}
 
 
 def load_versions(filter_version: str | None = None) -> list[str]:
     data = yaml.safe_load(VERSIONS_FILE.read_text())
-    versions: list[str] = []
-    for patch_list in data.values():
-        versions.extend(str(v) for v in patch_list)
+    versions = [str(v) for patch_list in data.values() for v in patch_list]
     if filter_version:
         versions = [v for v in versions if v == filter_version]
     return versions
 
 
-def scrape_version(page: Page, version: str, filter_section: str | None, filter_command: str | None, cfg: dict) -> None:
-    log(f"\n=== Discovering {version} ===", cfg["quiet"])
-    commands = discover_commands(page, version)
+async def _fetch(client: httpx.AsyncClient, url: str, cfg: dict) -> httpx.Response | None:
+    for attempt in range(cfg["retries"]):
+        try:
+            r = await client.get(url)
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", cfg["delay"] * (2 ** attempt)))
+                logger.warning("Rate limited (429) on %s — waiting %ss (attempt %d/%d)",
+                               url, wait, attempt + 1, cfg["retries"])
+                await asyncio.sleep(wait)
+                continue
+            if r.status_code == 404:
+                logger.warning("Not found (404): %s", url)
+                return None
+            r.raise_for_status()
+            return r
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            if attempt < cfg["retries"] - 1:
+                wait = cfg["delay"] * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning("Error on %s: %s — retrying in %.1fs (attempt %d/%d)",
+                               url, exc, wait, attempt + 1, cfg["retries"])
+                await asyncio.sleep(wait)
+            else:
+                logger.error("Failed %s after %d attempts: %s", url, cfg["retries"], exc)
+    return None
+
+
+async def scrape_version(
+    client: httpx.AsyncClient,
+    version: str,
+    filter_section: str | None,
+    filter_command: str | None,
+    cfg: dict,
+    failures: list[str],
+) -> None:
+    logger.info("=== Discovering %s ===", version)
+    commands = await discover_commands(client, version)
 
     if filter_section:
         commands = [(s, sl, u) for s, sl, u in commands if s == filter_section]
-
     if filter_command:
         cmd_filter = filter_command.lower().replace(" ", "-")
         commands = [(s, sl, u) for s, sl, u in commands if cmd_filter in sl.lower()]
 
-    log(f"  {len(commands)} commands to process", cfg["quiet"])
-
+    to_fetch: list[tuple[str, str, str, Path]] = []
     for section, slug, url in commands:
-        out = output_path(REPO_ROOT, version, section, slug, output_dir=cfg["output_dir"])
-
+        out = output_path(_HERE, version, section, slug, output_dir=cfg["output_dir"])
         if not cfg["force"] and out.exists() and out.stat().st_size > cfg["min_size"]:
-            log(f"  [{version}] SKIP {section}/{slug}", cfg["quiet"])
-            continue
+            logger.debug("[%s] SKIP %s/%s", version, section, slug)
+        else:
+            to_fetch.append((section, slug, url, out))
 
-        log(f"  [{version}] {section}/{slug}", cfg["quiet"])
+    logger.info("[%s] %d to fetch, %d skipped", version, len(to_fetch), len(commands) - len(to_fetch))
 
-        for attempt in range(cfg["retries"]):
+    sem = asyncio.Semaphore(cfg["concurrency"])
+
+    async def process_one(section: str, slug: str, url: str, out: Path) -> None:
+        async with sem:
+            logger.info("[%s] %s/%s", version, section, slug)
+            response = await _fetch(client, url, cfg)
+            if response is None:
+                failures.append(f"{version}/{section}/{slug}")
+                return
             try:
-                page.goto(url, wait_until=cfg["wait_until"], timeout=cfg["timeout"])
-                name, desc, syntax, table_html = extract_page(page)
+                name, desc, syntax, table_html = extract_page(response.content)
                 pandoc_table = table_to_pandoc(table_html) if table_html else None
                 content = build_markdown(name, desc, syntax, pandoc_table)
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(content, encoding="utf-8")
-                time.sleep(cfg["delay"])
-                break
-            except Exception as exc:  # noqa: BLE001
-                if attempt == cfg["retries"] - 1:
-                    log(f"    ERROR after {cfg['retries']} attempts: {exc} — skipping", cfg["quiet"])
-                    time.sleep(cfg["delay"])
-                else:
-                    log(f"    Retry {attempt + 1}/{cfg['retries']}...", cfg["quiet"])
-                    time.sleep(cfg["delay"] * 2)
+            except Exception as exc:
+                logger.error("[%s] ERROR processing %s/%s: %s", version, section, slug, exc)
+                failures.append(f"{version}/{section}/{slug}")
+            await asyncio.sleep(cfg["delay"])
+
+    await asyncio.gather(*(process_one(s, sl, u, out) for s, sl, u, out in to_fetch))
+
+
+async def _run(args: argparse.Namespace) -> None:
+    config = load_config()
+    config = merge_args(config, args)
+
+    versions = load_versions(args.version)
+    if not versions:
+        logger.warning("No versions matched — check versions.yaml or --version argument.")
+        return
+
+    logger.info("Scraping %d version(s): %s", len(versions), ", ".join(versions))
+
+    failures: list[str] = []
+    async with httpx.AsyncClient(
+        headers={"User-Agent": config["user_agent"]},
+        timeout=httpx.Timeout(config["timeout"]),
+        follow_redirects=True,
+        http2=True,
+    ) as client:
+        for version in versions:
+            await scrape_version(client, version, args.section, args.command, config, failures)
+
+    if failures:
+        logger.warning("%d command(s) failed:", len(failures))
+        for f in failures:
+            logger.warning("  %s", f)
+
+    logger.info("Done.")
 
 
 def main() -> None:
@@ -131,42 +184,27 @@ def main() -> None:
     parser.add_argument("--version", help="Scrape only this version (e.g. 8.0.0)")
     parser.add_argument("--section", help="Scrape only this section (e.g. alertemail)")
     parser.add_argument("--command", help="Scrape commands matching this slug (spaces→hyphens, partial match)")
-    parser.add_argument("--force", action="store_true", default=None,
-                        help="Force rescape even if files exist")
+    parser.add_argument("--force", action=argparse.BooleanOptionalAction, default=None,
+                        help="Force rescrape even if files exist")
     parser.add_argument("--retries", type=int, help="Max retry attempts per page")
-    parser.add_argument("--delay", type=float, help="Seconds between requests")
-    parser.add_argument("--timeout", type=int, help="Page navigation timeout (ms)")
-    parser.add_argument("--wait-until", dest="wait_until",
-                        choices=["domcontentloaded", "load", "networkidle"],
-                        help="Playwright wait strategy")
+    parser.add_argument("--delay", type=float, help="Seconds between requests per concurrent slot")
+    parser.add_argument("--timeout", type=float, help="HTTP request timeout in seconds")
     parser.add_argument("--min-size", dest="min_size", type=int,
                         help="Min file size (bytes) to consider a file already scraped")
-    parser.add_argument("--headed", action="store_true", default=None,
-                        help="Launch visible browser (debugging)")
-    parser.add_argument("--quiet", action="store_true", default=None,
-                        help="Suppress all output except errors")
+    parser.add_argument("--concurrency", type=int,
+                        help="Max parallel page fetches — semaphore size (default 5)")
+    parser.add_argument("--quiet", action=argparse.BooleanOptionalAction, default=None,
+                        help="Suppress INFO output (warnings and errors only)")
     args = parser.parse_args()
 
     config = merge_args(config, args)
+    logging.basicConfig(
+        level=logging.WARNING if config["quiet"] else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
-    versions = load_versions(args.version)
-    if not versions:
-        print("No versions matched. Check versions.yaml or --version argument.")
-        return
-
-    log(f"Scraping {len(versions)} version(s): {', '.join(versions)}", config["quiet"])
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not config["headed"])
-        try:
-            context = browser.new_context(user_agent=config["user_agent"])
-            pg = context.new_page()
-            for version in versions:
-                scrape_version(pg, version, args.section, args.command, config)
-        finally:
-            browser.close()
-
-    log("\nDone.", config["quiet"])
+    asyncio.run(_run(args))
 
 
 if __name__ == "__main__":

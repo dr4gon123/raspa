@@ -1,9 +1,6 @@
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from extract import slug_to_filename, output_path, build_markdown, table_to_pandoc
+from extract import build_markdown, output_path, slug_to_filename, table_to_pandoc
 
 
 def test_slug_to_filename_replaces_hyphens():
@@ -47,7 +44,7 @@ def test_table_to_pandoc_produces_grid_table():
     </table>
     """
     result = table_to_pandoc(html)
-    # Pandoc grid tables use +---+ borders
+    # Pandoc grid tables use +---+ borders (required for nested sub-tables in cells)
     assert "+" in result
     assert "Parameter" in result
     assert "severity" in result

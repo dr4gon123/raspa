@@ -1,32 +1,30 @@
 # Scraper default settings.
 # Override any of these with CLI flags (flags take priority).
 
-# Rescape files even if they already exist
+# Rescrape files even if they already exist
 force: false
 
-# Max retry attempts per page
+# Max retry attempts per page (exponential backoff: delay * 2^attempt + jitter)
 retries: 3
 
-# Seconds between requests (throttle)
+# Seconds between requests per concurrent slot (politeness delay)
 delay: 1.5
 
-# Page navigation timeout (milliseconds)
-timeout: 30000
-
-# Playwright wait strategy: domcontentloaded, load, networkidle
-wait_until: domcontentloaded
+# HTTP request timeout in seconds
+timeout: 30.0
 
 # Minimum file size (bytes) to consider a file "already scraped"
 min_size: 200
 
-# Output subdirectory under REPO_ROOT
+# Output subdirectory under repo root
 output_dir: config
 
-# User-Agent header
-user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# User-Agent header sent with every request
+user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Launch browser with visible window (debugging)
-headed: false
-
-# Suppress progress output (only errors)
+# Suppress INFO output (warnings and errors only)
 quiet: false
+
+# Max concurrent page fetches (asyncio.Semaphore size)
+# With delay=1.5 and concurrency=5, effective rate is ~3.3 req/s
+concurrency: 5
