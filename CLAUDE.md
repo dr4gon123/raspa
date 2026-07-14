@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-RASPA scrapes the Fortinet CLI configuration command reference for all configured FortiOS versions
-and saves each command as a Markdown file (heading + syntax block + pipe-table parameters).
+RASPA scrapes two Fortinet documentation sources for all configured FortiOS versions:
+
+- **CLI command reference** (`scrape_cli_ref.py`) — saves each command as a Markdown file (heading + syntax block + parameters table) under `config/`
+- **FortiGuard web filter categories** (`scrape_log_ref.py`) — saves the category table as a Markdown file under `wfc/`
 
 ## Commands
 
@@ -13,15 +15,19 @@ and saves each command as a Markdown file (heading + syntax block + pipe-table p
 # Install dependencies
 pip install -r requirements.txt
 
-# Run scraper (all versions)
+# CLI command reference scraper (all versions)
 python scrape_cli_ref.py
-
-# Run scraper (targeted)
 python scrape_cli_ref.py --version 8.0.0
 python scrape_cli_ref.py --version 8.0.0 --section alertemail
 python scrape_cli_ref.py --force          # rescrape existing files
 python scrape_cli_ref.py --concurrency 10 # more parallel slots
 python scrape_cli_ref.py --quiet          # warnings and errors only
+
+# FortiGuard web filter categories scraper (all versions)
+python scrape_log_ref.py
+python scrape_log_ref.py --version 8.0.0
+python scrape_log_ref.py --force
+python scrape_log_ref.py --quiet
 
 # Run tests
 pytest
@@ -29,17 +35,18 @@ pytest
 
 ## Architecture
 
-Three modules + one config file + one versions file:
+Four modules + one config file + one versions file:
 
 ```
-scrape_cli_ref.py   — async orchestrator, CLI, retry logic, concurrency
-discover.py         — fetches TOC page, returns list of (section, slug, url)
+scrape_cli_ref.py   — CLI reference: async orchestrator, CLI, retry logic, concurrency
+scrape_log_ref.py   — log reference: scrapes FortiGuard web filter categories (one URL per version)
+discover.py         — fetches CLI TOC page, returns list of (section, slug, url)
 extract.py          — parses SSR HTML, builds markdown; pure functions, no I/O
-scraper.yaml        — all runtime tunables (see Configuration below)
+scraper.yaml        — all runtime tunables (see Configuration below); shared by both scrapers
 versions.yaml       — list of FortiOS versions to scrape
 ```
 
-### Data flow
+### CLI reference data flow (`scrape_cli_ref.py`)
 
 1. `load_versions()` reads `versions.yaml`
 2. For each version, `discover_commands(client, version)` fetches the TOC page and returns
@@ -49,6 +56,14 @@ versions.yaml       — list of FortiOS versions to scrape
    `asyncio.Semaphore(cfg["concurrency"])`.
 4. Each slot calls `_fetch` (with exponential backoff), then `extract_page` (BS4 parse),
    then `build_markdown`, then writes the `.md` file.
+
+### Web filter categories data flow (`scrape_log_ref.py`)
+
+1. `load_versions()` reads `versions.yaml`
+2. No discovery step — constructs one fixed URL per version:
+   `https://docs.fortinet.com/document/fortigate/{version}/fortios-log-message-reference/755423/fortiguard-web-filter-categories`
+3. Versions fetched concurrently behind `asyncio.Semaphore(cfg["concurrency"])`.
+4. Each slot calls `_fetch`, then `extract_categories` (h1 + first table), then writes one `.md` file.
 
 ### Why numeric-ID URLs
 
@@ -72,16 +87,21 @@ The WAF only requires a real User-Agent header (not a full browser fingerprint).
 | `quiet` | `false` | Suppress INFO logs |
 | `concurrency` | `5` | `asyncio.Semaphore` size — max parallel fetches |
 
-All keys can be overridden via CLI flags. Run `python scrape_cli_ref.py --help` for the full list.
+All keys can be overridden via CLI flags. Run `python scrape_cli_ref.py --help` or `python scrape_log_ref.py --help` for the full list. Note: `output_dir` applies only to `scrape_cli_ref.py`; `scrape_log_ref.py` always writes to `wfc/`.
 
 ## Output structure
 
 ```
-config/
+config/                   # CLI command reference
 └── <major>/              # e.g. 7.6/
     └── <version>/        # e.g. 7.6.0/
         └── <section>/    # e.g. alertemail/
             └── <slug>.md # e.g. config_alertemail_setting.md
+
+wfc/                      # FortiGuard web filter categories
+└── <major>/              # e.g. 7.6/
+    └── <version>/        # e.g. 7.6.0/
+        └── fortiguard-web-filter-categories.md
 ```
 
 ## Code conventions
@@ -110,7 +130,7 @@ All new code must follow these conventions.
 - **`httpx.AsyncClient`** for all HTTP — never `requests` or `urllib`.
 - One shared `AsyncClient` per run (created in `_run()`), passed down to all callers.
 - All network functions are `async def`.
-- **Retry via `_fetch()`** in `scrape_cli_ref.py` — exponential backoff
+- **Retry via `_fetch()`** in `scrape_cli_ref.py` (imported by `scrape_log_ref.py`) — exponential backoff
   (`delay * 2**attempt + jitter`), 429/Retry-After handling, 404 treated as permanent.
 - **Concurrency via `asyncio.Semaphore(cfg["concurrency"])`** — never `ThreadPoolExecutor`.
   The semaphore wraps the fetch + write block; the politeness sleep is inside the semaphore.

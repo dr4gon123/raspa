@@ -1,8 +1,9 @@
 # RASPA — FortiOS CLI Reference Scraper
 
-Playwright-based scraper that fetches all FortiOS CLI `config` command
+Async `httpx`-based scraper that fetches FortiOS CLI `config` command
 reference pages from docs.fortinet.com and saves them as structured
-Markdown files with Pandoc Grid Tables.
+Markdown files with Pandoc Grid Tables. No browser or JavaScript required —
+numeric-ID URLs are fully server-rendered.
 
 The `config/` directory contains the pre-scraped output, organized as:
 
@@ -16,7 +17,6 @@ See `versions.yaml` for the full list. Currently: 7.4.x, 7.6.x, 8.0.x.
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium
 
 # Scrape a single version + section (quick test)
 python scrape_cli_ref.py --version 8.0.0 --section alertemail
@@ -29,15 +29,21 @@ python scrape_cli_ref.py
 
 # Force re-scrape
 python scrape_cli_ref.py --force
+
+# Scrape FortiGuard web filter categories
+python scrape_log_ref.py
 ```
+
+See `scrape_cli_ref.py --help` and `scrape_log_ref.py --help` for all flags.
+Runtime tunables (concurrency, retries, timeouts, etc.) live in `scraper.yaml`.
 
 ## Running tests
 
 ```bash
-pytest tests/ -v
+pytest -v
 ```
 
 ## Prerequisites
 
-- Python 3.11+
-- Pandoc system binary: `sudo dnf install pandoc` (Fedora) or `sudo apt install pandoc` (Debian/Ubuntu)
+- Python 3.10+
+- `pypandoc_binary` bundles the Pandoc binary, so no system Pandoc install is needed.
