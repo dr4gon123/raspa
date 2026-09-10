@@ -13,6 +13,13 @@ The `config/` directory contains the pre-scraped output, organized as:
 
 See `versions.yaml` for the full list. Currently: 7.4.x, 7.6.x, 8.0.x.
 
+New releases are picked up automatically: a scheduled GitHub Action
+(`.github/workflows/check-fortios-releases.yml`) checks docs.fortinet.com every
+Monday at 06:00 UTC for FortiOS versions (7.4+) missing from `versions.yaml`,
+adds them, runs both scrapers, and pushes the result to `main`. It can also be
+triggered manually via *Actions → Check FortiOS releases → Run workflow*. To
+check locally without modifying `versions.yaml`: `python check_new_versions.py`.
+
 ## Usage
 
 ```bash

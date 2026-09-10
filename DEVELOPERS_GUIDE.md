@@ -297,6 +297,29 @@ No code change is required. For the CLI scraper, discovery is automatic from the
 TOC page. For the web filter scraper, the URL is built from the version string
 plus the fixed doc ID `755423`.
 
+### Automated Release Tracking
+
+`check_new_versions.py` automates this: it fetches `docs.fortinet.com/product/fortigate`
+to list branches, then for each branch at or above `MIN_TRACKED_MAJOR` (default
+`7.4`) it extracts the versions linked to both the `cli-reference` and
+`fortios-log-message-reference` documents and takes the intersection — a version
+is only reported when both scrapers can fetch it. Versions missing from
+`versions.yaml` are new releases. A page that parses to zero links raises an
+error, so layout changes fail loudly instead of silently reporting "no new
+releases".
+
+The `.github/workflows/check-fortios-releases.yml` workflow runs this check
+weekly (cron `0 6 * * 1`, or manually via `workflow_dispatch`). When new
+versions are found it inserts them into `versions.yaml` (preserving comments
+and branch grouping), runs both scrapers, and commits to `main` as
+`feat: scrape FortiOS <versions>`.
+
+CLI flags:
+
+- `--update-config` — insert discovered versions into `versions.yaml` (without it, only reports)
+- `--min-major X.Y` — override the discovery floor (default `7.4`)
+- `--github-output` — write `count`, `new_versions` (JSON), and `display` to `$GITHUB_OUTPUT` for the workflow
+
 ---
 
 ## Extending Extraction
