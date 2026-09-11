@@ -57,6 +57,8 @@ jobs:
           else
             git commit -m "fix: backfill missing scraped pages"
           fi
+          # The run may take ~20 min; rebase in case main moved meanwhile.
+          git pull --rebase origin main
           git push
 
       - name: Write job summary
