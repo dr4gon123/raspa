@@ -314,6 +314,14 @@ versions are found it inserts them into `versions.yaml` (preserving comments
 and branch grouping), runs both scrapers, and commits to `main` as
 `feat: scrape FortiOS <versions>`.
 
+Because the scrapers log per-page failures but exit 0, a run whose fetches
+partially failed would otherwise commit incomplete data forever — the check
+only triggers scraping for versions new to `versions.yaml`. To self-heal, the
+workflow also runs both scrapers on a monthly cron (`0 7 1 * *`) and on manual
+dispatches regardless of the check result; the disk-based resume refetches
+anything missing, and a commit is only made when files actually changed
+(`fix: backfill missing scraped pages`).
+
 CLI flags:
 
 - `--update-config` — insert discovered versions into `versions.yaml` (without it, only reports)
