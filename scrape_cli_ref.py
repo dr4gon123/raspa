@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from discover import discover_commands
+from discover import _fetch, discover_commands
 from extract import build_markdown, extract_page, output_path, table_to_pandoc
 
 _HERE = Path(__file__).resolve().parent
@@ -72,32 +72,6 @@ def load_versions(filter_version: str | None = None) -> list[str]:
     return versions
 
 
-async def _fetch(client: httpx.AsyncClient, url: str, cfg: dict) -> httpx.Response | None:
-    for attempt in range(cfg["retries"]):
-        try:
-            r = await client.get(url)
-            if r.status_code == 429:
-                wait = int(r.headers.get("Retry-After", cfg["delay"] * (2 ** attempt)))
-                logger.warning("Rate limited (429) on %s — waiting %ss (attempt %d/%d)",
-                               url, wait, attempt + 1, cfg["retries"])
-                await asyncio.sleep(wait)
-                continue
-            if r.status_code == 404:
-                logger.warning("Not found (404): %s", url)
-                return None
-            r.raise_for_status()
-            return r
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            if attempt < cfg["retries"] - 1:
-                wait = cfg["delay"] * (2 ** attempt) + random.uniform(0, 1)
-                logger.warning("Error on %s: %s — retrying in %.1fs (attempt %d/%d)",
-                               url, exc, wait, attempt + 1, cfg["retries"])
-                await asyncio.sleep(wait)
-            else:
-                logger.error("Failed %s after %d attempts: %s", url, cfg["retries"], exc)
-    return None
-
-
 async def scrape_version(
     client: httpx.AsyncClient,
     version: str,
@@ -107,7 +81,7 @@ async def scrape_version(
     failures: list[str],
 ) -> None:
     logger.info("=== Discovering %s ===", version)
-    commands = await discover_commands(client, version)
+    commands = await discover_commands(client, version, cfg)
 
     if filter_section:
         commands = [(s, sl, u) for s, sl, u in commands if s == filter_section]
@@ -167,7 +141,13 @@ async def _run(args: argparse.Namespace) -> None:
         http2=True,
     ) as client:
         for version in versions:
-            await scrape_version(client, version, args.section, args.command, config, failures)
+            try:
+                await scrape_version(client, version, args.section, args.command, config, failures)
+            except RuntimeError as exc:
+                # A discovery failure must not abort the remaining versions —
+                # the monthly self-heal pass depends on running through them all.
+                logger.error("[%s] ERROR: %s", version, exc)
+                failures.append(f"{version}/discovery")
 
     if failures:
         logger.warning("%d command(s) failed:", len(failures))

@@ -164,24 +164,31 @@ by importing `_fetch`, `load_config`, `load_versions`, and `merge_args` from
 
 ## Module Reference
 
-### `discover.py` — `discover_commands(client, version)`
+### `discover.py` — TOC fetching + parsing
 
-Fetches the CLI reference TOC page (`/document/fortigate/<version>/cli-reference/`)
-and parses its `<a class="toc">` links with BeautifulSoup. Returns
-`list[tuple[section, slug, url]]`.
+| Function | What it does |
+|----------|--------------|
+| `toc_url(version)` | `https://docs.fortinet.com/document/fortigate/<version>/cli-reference/` — redirects to a numeric-ID landing page (e.g. `/cli-reference/84566/fortios-cli-reference`). |
+| `_fetch(client, url, cfg)` | Shared retry loop (re-exported by `scrape_cli_ref.py`, imported by `scrape_log_ref.py`): 429 honors `Retry-After`; 404 is permanent (returns `None`); other errors use exponential backoff `delay * 2**attempt + random.uniform(0,1)`. |
+| `parse_toc_commands(html)` | Pure parser: TOC HTML → `list[tuple[section, slug, url]]`. |
+| `discover_commands(client, version, cfg)` | Fetches the TOC via `_fetch` and parses it. Raises `RuntimeError` on a fetch failure or if zero commands parse — the caller isolates this per version. |
 
-Logic:
+TOC parsing rules:
+
+- TOC anchors are matched by class `toc` or `toc__*` (Fortinet renamed `toc` →
+  `toc__link` in October 2026; both are accepted). BS4 passes class tokens to
+  callables individually, plus `None` for classless anchors — the matcher
+  handles all three.
 - Walk links until `slug == "cli-configuration-commands"`; only links after this
-  marker are in the config-command section.
-- Track the most recent **non-`config-`** slug as `current_section`. The first
-  non-config slug before a block of `config-*` commands is the section name
-  (e.g. `alertemail`).
-- Each `config-*` link produces `(current_section, slug, numeric_id_url)`.
-- Stop at `_SECTION_TERMINATORS` (`cli-diagnose-commands`, `cli-execute-commands`)
-  — these mark the end of the config section.
-- De-duplicate by slug via `seen_slugs`.
-- Raise `RuntimeError` if nothing was found, so a restructured TOC page fails
-  loudly instead of silently producing empty output.
+  marker are in the config-command section. Stop at `_SECTION_TERMINATORS`
+  (`cli-diagnose-commands`, `cli-execute-commands`).
+- Every anchor sits in a `<span class="toc__label">` next to either a
+  `<span class="toc__leaf">` (command page) or a `<button class="toc__toggle">`
+  (expandable section node). A `config-*` **leaf** is a command; a `config-*`
+  **toggle** is a section — FortiOS 8 TOCs name section pages `config-*` — and
+  is stored without the `config-` prefix so output paths match the 7.x layout
+  (`config-alertemail` → section `alertemail`). Plain slugs are always sections.
+- De-duplicate commands by slug via `seen_slugs`.
 
 The URLs returned are always the **numeric-ID URLs** embedded in the TOC HTML,
 which is what makes the rest of the pipeline JS-free.
@@ -205,10 +212,15 @@ No I/O here. All functions take bytes/strings and return strings or tuples.
 | `load_config()` | `DEFAULT_CONFIG.copy()` then overlay `scraper.yaml`. CLI flags override via `merge_args`. |
 | `merge_args(cfg, args)` | Dict comprehension: keep only `args` keys present in `_OVERRIDABLE` with a non-`None` value. |
 | `load_versions(filter_version)` | Flatten `versions.yaml` (a `{major: [patches]}` map) into a flat version list; optional exact `--version` filter. |
-| `_fetch(client, url, cfg)` | Retry loop: 429 honors `Retry-After`; 404 is permanent (returns `None`); other errors use exponential backoff `delay * 2**attempt + random.uniform(0,1)`. Returns `httpx.Response | None`. |
+| `_fetch(client, url, cfg)` | Defined in `discover.py`, re-exported here (see above). |
 | `scrape_version(client, version, filter_section, filter_command, cfg, failures)` | Discover → filter → skip existing → `asyncio.gather` over `process_one` behind a `Semaphore(cfg["concurrency"])`. |
 | `process_one(section, slug, url, out)` | The per-command worker: fetch → extract → pandoc → build → write, all inside the semaphore; sleeps `cfg["delay"]` after writing. Appends to `failures` on fetch/parse failure. |
 | `main()` | Build argparse, merge config, configure `logging`, `asyncio.run(_run(...))`. |
+
+`_run` isolates discovery failures per version: a `RuntimeError` from
+`discover_commands` is logged, recorded as `<version>/discovery` in `failures`,
+and the remaining versions continue — one broken TOC must not abort the whole
+monthly self-heal pass.
 
 ### `scrape_log_ref.py` — orchestration
 

@@ -130,7 +130,7 @@ All new code must follow these conventions.
 - **`httpx.AsyncClient`** for all HTTP — never `requests` or `urllib`.
 - One shared `AsyncClient` per run (created in `_run()`), passed down to all callers.
 - All network functions are `async def`.
-- **Retry via `_fetch()`** in `scrape_cli_ref.py` (imported by `scrape_log_ref.py`) — exponential backoff
+- **Retry via `_fetch()`** in `discover.py` (re-exported by `scrape_cli_ref.py`, imported by `scrape_log_ref.py`) — exponential backoff
   (`delay * 2**attempt + jitter`), 429/Retry-After handling, 404 treated as permanent.
 - **Concurrency via `asyncio.Semaphore(cfg["concurrency"])`** — never `ThreadPoolExecutor`.
   The semaphore wraps the fetch + write block; the politeness sleep is inside the semaphore.
